@@ -55,10 +55,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
-This runs all seven attacks across their respective parameter ranges (5 independent trials per data point, fixed random seeds throughout). On completion it writes:
+This runs the full statistical experiment suite (`experiments.py`) and then regenerates the eight figures (`plots.py`). The suite runs all seven attacks across their respective parameter ranges with **50 independent trials per data point** (20 for Coppersmith, whose symbolic resultant is more expensive), fixed random seeds throughout. On completion it writes:
 
-- **`results.csv`** — raw timing and success-rate data, one row per (attack, parameter value)
-- **`results.txt`** — human-readable summary of the same data
+- **`results.csv`** — raw per-trial timings, one row per (attack, parameter value, trial)
+- **`results_stats.csv`** — per-point summary statistics (mean, median, standard deviation, IQR)
+- **`results.txt`** — human-readable summary table of the same statistics
+
+The experiment suite can also be run on its own with `python experiments.py`.
 
 All random seeds are set deterministically (`seed=42` for demos, `seed=0` for scaling experiments), so repeated runs produce identical output.
 
@@ -89,8 +92,9 @@ fig_smart_runtime.{pdf,png}
 
 ```
 .
-├── main.py            Entry point: runs all attacks, writes results.csv and results.txt
-├── plots.py           Reads results.csv, generates the eight thesis figures
+├── main.py            Entry point: runs the experiment suite, then regenerates the figures
+├── experiments.py     Statistical runner: 50 trials/point, writes results.csv, results_stats.csv, results.txt
+├── plots.py           Reads results.csv, generates the eight thesis figures (median + IQR error bars)
 ├── utils.py           Shared utilities: modular arithmetic, CRT, integer nth-root, RSA key generation
 ├── wiener.py          Wiener's attack on RSA (small private exponent)
 ├── hastad.py          Håstad's broadcast attack on RSA (small public exponent e = 3)

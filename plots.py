@@ -1,8 +1,17 @@
 # plots.py
-# Generate thesis figures from experimental results (reads results.csv)
+# Generate thesis figures from experimental results.
+#
+# Reads the raw per-trial timings in results.csv (written by experiments.py),
+# and for each parameter point plots the median runtime with error bars showing
+# the inter-quartile range (IQR).  The IQR makes Pollard's rho's run-to-run
+# variance visible while remaining negligible for the deterministic attacks.
 
 import csv
 import sys
+import statistics
+
+import matplotlib
+matplotlib.use('Agg')           # headless backend (no display needed)
 import matplotlib.pyplot as plt
 
 # ── Styling ──────────────────────────────────────────────────────────────────
@@ -21,272 +30,201 @@ plt.rcParams.update({
 })
 
 
-# ── CSV loader ────────────────────────────────────────────────────────────────
+# ── Raw-data loader ───────────────────────────────────────────────────────────
 
 def load_results(csv_path='results.csv'):
-    """Read results.csv and return a dict keyed by attack name.
+    """Read the raw per-trial results.csv and return a dict keyed by attack.
 
-    Each value is a list of row dicts (parameter_value, trials, successes,
-    avg_time_seconds), sorted by parameter_value ascending.
-
-    Exits with an error message if the file is missing or contains no data rows.
+    Each value is a list of per-point dicts with keys:
+        param, n, median, q1, q3, mean
+    sorted by parameter value ascending.
     """
     try:
         with open(csv_path, newline='') as f:
             rows = list(csv.DictReader(f))
     except FileNotFoundError:
         print(f"[!] '{csv_path}' not found.")
-        print("    Run  python main.py  first to generate the data file.")
+        print("    Run  python experiments.py  first to generate the data file.")
         sys.exit(1)
 
-    if not rows:
-        print(f"[!] '{csv_path}' exists but contains no data rows.")
-        print("    Run  python main.py  first to populate it.")
+    if not rows or 'time_seconds' not in rows[0]:
+        print(f"[!] '{csv_path}' is empty or not in the expected per-trial format.")
+        print("    Run  python experiments.py  first to (re)generate it.")
         sys.exit(1)
+
+    grouped = {}   # (attack, param) -> list of times
+    for row in rows:
+        key = (row['attack'], int(row['parameter_value']))
+        grouped.setdefault(key, []).append(float(row['time_seconds']))
 
     results = {}
-    for row in rows:
-        attack = row['attack']
-        entry = {
-            'parameter_value':   int(row['parameter_value']),
-            'trials':            int(row['trials']),
-            'successes':         int(row['successes']),
-            'avg_time_seconds':  float(row['avg_time_seconds']),
-        }
-        results.setdefault(attack, []).append(entry)
+    for (attack, param), times in grouped.items():
+        median = statistics.median(times)
+        if len(times) >= 2:
+            q1, _q2, q3 = statistics.quantiles(times, n=4, method='inclusive')
+        else:
+            q1 = q3 = median
+        results.setdefault(attack, []).append({
+            'param':  param,
+            'n':      len(times),
+            'median': median,
+            'q1':     q1,
+            'q3':     q3,
+            'mean':   statistics.mean(times),
+        })
 
     for attack in results:
-        results[attack].sort(key=lambda r: r['parameter_value'])
-
+        results[attack].sort(key=lambda r: r['param'])
     return results
 
 
-def _extract(rows):
-    """Return (parameter_values, avg_times) lists from a list of row dicts."""
-    xs = [r['parameter_value']  for r in rows]
-    ys = [r['avg_time_seconds'] for r in rows]
-    return xs, ys
+def _xyerr(rows):
+    """Return (xs, medians, asymmetric_yerr) for an errorbar plot."""
+    xs      = [r['param']  for r in rows]
+    medians = [r['median'] for r in rows]
+    lower   = [r['median'] - r['q1'] for r in rows]
+    upper   = [r['q3'] - r['median'] for r in rows]
+    return xs, medians, [lower, upper]
 
 
-# ── write_results_txt ─────────────────────────────────────────────────────────
-
-def write_results_txt(csv_path, txt_path):
-    """Write a human-readable summary of csv_path to txt_path."""
-    results = load_results(csv_path)
-
-    attack_labels = {
-        'wiener':          "Wiener's Attack",
-        'hastad':          "Håstad's Broadcast Attack",
-        'coppersmith':     "Coppersmith's Short Pad Attack",
-        'bsgs':            "Baby-step Giant-step (BSGS)",
-        'pohlig_hellman':  "Pohlig-Hellman",
-        'pollard_rho':     "Pollard's Rho (ECDLP)",
-        'smart':           "Smart's Attack",
-    }
-    param_labels = {
-        'key_bits': 'Key size (bits)',
-        'q_bits':   'Subgroup order (bits)',
-        'p_bits':   'Curve/prime size (bits)',
-    }
-
-    param_name_map = {}
-    try:
-        with open(csv_path, newline='') as f:
-            for row in csv.DictReader(f):
-                param_name_map.setdefault(row['attack'], row['parameter_name'])
-    except FileNotFoundError:
-        pass
-
-    order = ['wiener', 'hastad', 'coppersmith',
-             'bsgs', 'pohlig_hellman',
-             'pollard_rho', 'smart']
-
-    lines = []
-    lines.append("EXPERIMENTAL RESULTS")
-    lines.append("Attacks on Public-Key Encryption Schemes")
-    lines.append("Velibor Smilevski, FAMNIT, 2026")
-    lines.append("=" * 60)
-
-    for attack in order:
-        if attack not in results:
-            continue
-        label  = attack_labels.get(attack, attack)
-        pname  = param_name_map.get(attack, 'parameter')
-        plabel = param_labels.get(pname, pname)
-
-        lines.append("")
-        lines.append(label)
-        lines.append("-" * len(label))
-        lines.append(
-            f"  {plabel:<24}  {'Trials':>6}  {'Success':>7}  {'Avg time (s)':>14}"
-        )
-
-        for r in results[attack]:
-            lines.append(
-                f"  {r['parameter_value']:<24}  "
-                f"{r['trials']:>6}  {r['successes']:>7}  "
-                f"{r['avg_time_seconds']:>14.6f}"
-            )
-
-    lines.append("")
-    lines.append("=" * 60)
-
-    with open(txt_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
+def _ntrials(rows):
+    return rows[0]['n'] if rows else 0
 
 
-# ── Figure generation (only when run directly) ────────────────────────────────
+# ── Figure generation ─────────────────────────────────────────────────────────
 
 def generate_figures(csv_path='results.csv'):
     """Load results.csv and write all figure PDFs/PNGs."""
     results = load_results(csv_path)
 
-    wiener_xs,      wiener_ys      = _extract(results['wiener'])
-    hastad_xs,      hastad_ys      = _extract(results['hastad'])
-    coppersmith_xs, coppersmith_ys = _extract(results['coppersmith'])
-    bsgs_xs,        bsgs_ys        = _extract(results['bsgs'])
-    ph_xs,          ph_ys          = _extract(results['pohlig_hellman'])
-    pollard_xs,     pollard_ys     = _extract(results['pollard_rho'])
-    smart_xs,       smart_ys       = _extract(results['smart'])
+    wiener      = results['wiener']
+    hastad      = results['hastad']
+    coppersmith = results['coppersmith']
+    bsgs        = results['bsgs']
+    ph          = results['pohlig_hellman']
+    pollard     = results['pollard_rho']
+    smart       = results['smart']
+
+    def save(name):
+        plt.tight_layout()
+        plt.savefig(f"{name}.pdf", bbox_inches='tight')
+        plt.savefig(f"{name}.png", bbox_inches='tight')
+        print(f"[+] Saved {name}.pdf")
+        plt.close()
 
     # Figure 1: Wiener
+    xs, ys, err = _xyerr(wiener)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(wiener_xs, wiener_ys,
-            marker='o', color='steelblue', linewidth=2,
-            markersize=7, label="Wiener's attack")
+    ax.errorbar(xs, ys, yerr=err, marker='o', color='steelblue', linewidth=2,
+                markersize=7, capsize=3, label="Wiener's attack")
     ax.set_xlabel("RSA key size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("Wiener's Attack: Runtime vs. Key Size (5 trials each)")
-    ax.set_xticks(wiener_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"Wiener's Attack: Runtime vs.\\ Key Size "
+                 f"(median of {_ntrials(wiener)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_wiener_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_wiener_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_wiener_runtime.pdf")
-    plt.close()
+    save("fig_wiener_runtime")
 
     # Figure 2: Hastad
+    xs, ys, err = _xyerr(hastad)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(hastad_xs, hastad_ys,
-            marker='s', color='darkorange', linewidth=2,
-            markersize=7, label="Håstad's broadcast attack")
+    ax.errorbar(xs, ys, yerr=err, marker='s', color='darkorange', linewidth=2,
+                markersize=7, capsize=3, label="Håstad's broadcast attack")
     ax.set_xlabel("RSA key size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("Håstad's Broadcast Attack: Runtime vs. Key Size (5 trials each)")
-    ax.set_xticks(hastad_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"Håstad's Broadcast Attack: Runtime vs. Key Size "
+                 f"(median of {_ntrials(hastad)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_hastad_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_hastad_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_hastad_runtime.pdf")
-    plt.close()
+    save("fig_hastad_runtime")
 
-    # Figure 3: RSA comparison
+    # Figure 3: RSA comparison (log scale)
+    wx, wy, werr = _xyerr(wiener)
+    hx, hy, herr = _xyerr(hastad)
+    cx, cy, cerr = _xyerr(coppersmith)
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(wiener_xs, wiener_ys,
-            marker='o', color='steelblue', linewidth=2,
-            markersize=7, label="Wiener's attack")
-    ax.plot(hastad_xs, hastad_ys,
-            marker='s', color='darkorange', linewidth=2,
-            markersize=7, label="Håstad's broadcast attack")
-    ax.plot(coppersmith_xs, coppersmith_ys,
-            marker='^', color='green', linewidth=2,
-            markersize=10, label="Coppersmith's short pad attack",
-            linestyle='none')
+    ax.errorbar(wx, wy, yerr=werr, marker='o', color='steelblue', linewidth=2,
+                markersize=7, capsize=3, label="Wiener's attack")
+    ax.errorbar(hx, hy, yerr=herr, marker='s', color='darkorange', linewidth=2,
+                markersize=7, capsize=3, label="Håstad's broadcast attack")
+    ax.errorbar(cx, cy, yerr=cerr, marker='^', color='green',
+                markersize=10, capsize=3, linestyle='none',
+                label="Coppersmith's short pad attack")
     ax.set_xlabel("RSA key size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
+    ax.set_ylabel("Median runtime (seconds)")
     ax.set_title("RSA Attack Runtime Comparison")
     ax.set_xticks([256, 512, 1024])
     ax.set_yscale('log')
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_comparison.pdf", bbox_inches='tight')
-    plt.savefig("fig_comparison.png", bbox_inches='tight')
-    print("[+] Saved fig_comparison.pdf")
-    plt.close()
+    save("fig_comparison")
 
     # Figure 4: BSGS
+    xs, ys, err = _xyerr(bsgs)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(bsgs_xs, bsgs_ys,
-            marker='o', color='mediumseagreen', linewidth=2,
-            markersize=7, label="Baby-step Giant-step")
+    ax.errorbar(xs, ys, yerr=err, marker='o', color='mediumseagreen', linewidth=2,
+                markersize=7, capsize=3, label="Baby-step Giant-step")
     ax.set_xlabel("Subgroup order size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("BSGS: Runtime vs. Subgroup Order Size (5 trials each)")
-    ax.set_xticks(bsgs_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"BSGS: Runtime vs. Subgroup Order Size "
+                 f"(median of {_ntrials(bsgs)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_bsgs_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_bsgs_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_bsgs_runtime.pdf")
-    plt.close()
+    save("fig_bsgs_runtime")
 
     # Figure 5: Pohlig-Hellman
+    xs, ys, err = _xyerr(ph)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(ph_xs, ph_ys,
-            marker='s', color='mediumpurple', linewidth=2,
-            markersize=7, label="Pohlig-Hellman")
+    ax.errorbar(xs, ys, yerr=err, marker='s', color='mediumpurple', linewidth=2,
+                markersize=7, capsize=3, label="Pohlig-Hellman")
     ax.set_xlabel("Smooth group order size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("Pohlig-Hellman: Runtime vs. Group Order Size (5 trials each)")
-    ax.set_xticks(ph_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"Pohlig-Hellman: Runtime vs. Group Order Size "
+                 f"(median of {_ntrials(ph)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_pohlig_hellman_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_pohlig_hellman_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_pohlig_hellman_runtime.pdf")
-    plt.close()
+    save("fig_pohlig_hellman_runtime")
 
-    # Figure 6: Pollard's rho
+    # Figure 6: Pollard's rho (variance is the point here)
+    xs, ys, err = _xyerr(pollard)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(pollard_xs, pollard_ys,
-            marker='^', color='tomato', linewidth=2,
-            markersize=7, label="Pollard's rho (ECDLP)")
+    ax.errorbar(xs, ys, yerr=err, marker='^', color='tomato', linewidth=2,
+                markersize=7, capsize=4, elinewidth=1.5,
+                label="Pollard's rho (ECDLP)")
     ax.set_xlabel("Curve order size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("Pollard's Rho (ECDLP): Runtime vs. Curve Order Size (5 trials each)")
-    ax.set_xticks(pollard_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"Pollard's Rho (ECDLP): Runtime vs. Curve Order Size "
+                 f"(median of {_ntrials(pollard)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_pollard_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_pollard_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_pollard_runtime.pdf")
-    plt.close()
+    save("fig_pollard_runtime")
 
-    # Figure 7: DH comparison
+    # Figure 7: DH comparison (log scale)
+    bx, by, berr = _xyerr(bsgs)
+    px, py, perr = _xyerr(ph)
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(bsgs_xs, bsgs_ys,
-            marker='o', color='mediumseagreen', linewidth=2,
-            markersize=7, label="Baby-step Giant-step")
-    ax.plot(ph_xs, ph_ys,
-            marker='s', color='mediumpurple', linewidth=2,
-            markersize=7, label="Pohlig-Hellman")
+    ax.errorbar(bx, by, yerr=berr, marker='o', color='mediumseagreen', linewidth=2,
+                markersize=7, capsize=3, label="Baby-step Giant-step")
+    ax.errorbar(px, py, yerr=perr, marker='s', color='mediumpurple', linewidth=2,
+                markersize=7, capsize=3, label="Pohlig-Hellman")
     ax.set_xlabel("Group order size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
+    ax.set_ylabel("Median runtime (seconds)")
     ax.set_title("DH/ElGamal Attack Runtime Comparison")
     ax.set_yscale('log')
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_dh_comparison.pdf", bbox_inches='tight')
-    plt.savefig("fig_dh_comparison.png", bbox_inches='tight')
-    print("[+] Saved fig_dh_comparison.pdf")
-    plt.close()
+    save("fig_dh_comparison")
 
     # Figure 8: Smart's attack
+    xs, ys, err = _xyerr(smart)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(smart_xs, smart_ys,
-            marker='D', color='slategray', linewidth=2,
-            markersize=7, label="Smart's attack")
+    ax.errorbar(xs, ys, yerr=err, marker='D', color='slategray', linewidth=2,
+                markersize=7, capsize=3, label="Smart's attack")
     ax.set_xlabel("Prime field size (bits)")
-    ax.set_ylabel("Average runtime (seconds)")
-    ax.set_title("Smart's Attack: Runtime vs. Prime Field Size (5 trials each)")
-    ax.set_xticks(smart_xs)
+    ax.set_ylabel("Median runtime (seconds)")
+    ax.set_title(f"Smart's Attack: Runtime vs. Prime Field Size "
+                 f"(median of {_ntrials(smart)} trials, error bars: IQR)")
+    ax.set_xticks(xs)
     ax.legend()
-    plt.tight_layout()
-    plt.savefig("fig_smart_runtime.pdf", bbox_inches='tight')
-    plt.savefig("fig_smart_runtime.png", bbox_inches='tight')
-    print("[+] Saved fig_smart_runtime.pdf")
-    plt.close()
+    save("fig_smart_runtime")
 
     print("\n[+] All figures generated successfully.")
     print("    Copy the .pdf files to your Overleaf project.")
